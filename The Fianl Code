@@ -1,0 +1,195 @@
+"""
+Created on Mon Oct  15 11:33:20 2018
+
+@author: Neal
+"""
+#%%
+import numpy as np
+import pandas as pd
+
+#import matplotlib.pyplot as plt
+#import seaborn as sns
+
+import itertools
+import datetime
+
+import glob
+
+#%%
+Extra_Weight = 5
+
+#%%
+
+df_ppa4 = pd.DataFrame()
+
+for i in glob.glob(r'*.GLS'):
+    dfA = pd.read_csv(i,sep = '^')
+    
+    c = list(dfA.SHEET_ID)
+    start = c.index('PPA_NAME')
+    end = c.index('RS_CHAMBER')
+    #根据标识符截取PPA数据    
+    
+    df_ppa = dfA.iloc[start:end,:]
+    df_ppa1 = df_ppa.T.set_index(start).T.iloc[:,2:8]
+    df_ppa1.columns = pd.Series(['PPA_NAME', 'POS_X', 'POS_Y', \
+                                 'POSITION_Z', 'PPA_X', 'PPA_Y'])
+    #重构index与columns     
+    
+    del df_ppa1['POSITION_Z']
+    df_ppa3 = df_ppa1.set_index('PPA_NAME').astype(float)
+    df_ppa4 = df_ppa4.append(df_ppa3)
+    #堆叠法
+
+
+'''
+def read_GLS(RAW):
+    dfA = pd.read_csv(RAW,sep = '^')
+    
+    print (dfA.iloc[:2,:])
+    c = list(dfA.SHEET_ID)
+    
+    start = c.index('PPA_NAME')
+    end = c.index('RS_CHAMBER')
+    #根据标识符截取PPA数据     s
+    
+    df_ppa = dfA.iloc[start:end,:]
+    df_ppa1 = df_ppa.T.set_index(start).T.iloc[:,2:8]
+    df_ppa1.columns = pd.Series(['PPA_NAME', 'POS_X', 'POS_Y',\
+                                 'POSITION_Z', 'PPA_X', 'PPA_Y'])
+    #重构index与columns     
+    
+    del df_ppa1['POSITION_Z']
+    df_ppa3 = df_ppa1.set_index('PPA_NAME').astype(float)
+    
+    return df_ppa3
+
+df_ppa4 = read_GLS('L1E9117B1062.GLS')
+#仅读取一个Glass数据
+'''
+
+#%%
+    
+
+p3 = df_ppa4.copy()
+
+OFFSETS = np.vstack(map(np.ravel,\
+                        np.meshgrid(np.arange(-10,11,1),\
+                                    np.arange(-10,11,1),\
+                                    np.arange(-100,100,10)))).T
+
+#%%
+def cal_offseted(data, off=np.array([0., 0., 0.])):
+
+    
+    data_offseted = data[:, [1, 0]] * [-1, 1] *\
+        off[2] * np.pi / 180 / 100 + off[[0, 1]] +\
+        data[:, 2:]
+        
+    return data_offseted
+# offset补偿后PPA值计算公式
+
+
+#%%
+    
+def cal_offseted_count(data,off = np.array([0., 0., 0.])):
+    data_offseted = np.abs(cal_offseted(data,off))
+    #优化后
+
+    rst = np.sum(data_offseted < 8) + \
+    Extra_Weight * np.sum(data_offseted < 5)
+    
+    rst_after = np.abs(cal_offseted(data,off))
+    rst_before = np.abs(cal_offseted(data))
+    
+    rst_after[rst_after<7] = False
+    rst_before[rst_before<7] = False
+    
+    rst_0 = rst_after > rst_before
+    
+    if rst_0.any() == True:
+        return 0
+    else:
+        return rst
+    
+#%%
+    
+def optimize_offset(dataset):
+    datasets = itertools.repeat(dataset,OFFSETS.shape[0])
+    #对dataset重复Offsets n长度次数
+    rst = np.fromiter(map(cal_offseted_count, datasets, OFFSETS), dtype=np.float)
+       
+    return rst
+# dataset如p2[['POS_X', 'POS_Y', 'PPA_X', 'PPA_Y']
+    
+#%%
+    
+def cal_ratio_bna(p3, off=np.zeros(3)):
+    p3 = p3[['POS_X', 'POS_Y', 'PPA_X', 'PPA_Y']]
+    
+    def cal_ratio(p3, threshold):
+        b1 = (p3[['PPA_X', 'PPA_Y']].abs() < threshold).mean()
+        b1['PPA_T'] = (p3[['PPA_X', 'PPA_Y']].abs().max(axis=1) < threshold).\
+            mean()
+        
+        b1.index = [x + str(threshold) for x in b1.index]
+        
+        return b1
+    
+    b = pd.concat([cal_ratio(p3, 5), cal_ratio(p3, 8)])
+    b.index = ['b_' + x for x in b.index]
+    
+    
+    p3_offseted = p3.copy()
+    
+    p3_offseted[['PPA_X', 'PPA_Y']] = cal_offseted(p3.values, off)
+    
+    a = pd.concat([cal_ratio(p3_offseted, 5), cal_ratio(p3_offseted, 8)])
+    a.index = ['a_' + x for x in a.index]
+    
+    return pd.concat([b, a])
+
+#%%
+    
+def cal_optimized_offset(p2):
+    rst2 = optimize_offset(p2[['POS_X', 'POS_Y', 'PPA_X', 'PPA_Y']].values)
+    
+    r1 = pd.DataFrame(OFFSETS)
+    r1.columns = ['X', 'Y', 'T']
+    #将全参数空间命名为X,Y,T     
+    r1['ppa_cnt'] = rst2
+    #使用offset后合格PPA的比例     
+    r1 = r1[r1.ppa_cnt != 0]
+    r0 = r1[r1.ppa_cnt.isin(r1.ppa_cnt.nlargest(9))]
+    #优化效果最好的前十个offset值         
+    r2 = r0.mean()
+    #优化效果最好的前10(10这个数字来源于log(n))个offset值取平均       
+    r2['ppa_cnt_before'] =\
+        cal_offseted_count(p2[['POS_X', 'POS_Y', 'PPA_X', 'PPA_Y']].values)
+    #参数优化前的PPA合格的Panel比例         
+    off = r2[['X', 'Y', 'T']].values
+    #优化参数     
+    return pd.concat([r2, cal_ratio_bna(p2, off)])
+
+#%%
+    
+time_start = datetime.datetime.now()
+
+time = time_start.strftime('%Y%m%d%H%M')
+
+
+#%%
+
+r4 = p3.groupby('PPA_NAME').\
+    apply(cal_optimized_offset).reset_index()
+   
+r4[['X', 'Y']] = r4[['X', 'Y']].astype(int) * -1
+#r4[['X', 'Y']] = (r4[['X', 'Y']] * 2).apply(round) / 2
+r4['T'] = r4['T']/10
+r4['T'] = 0.0001 * r4['T'].apply(int)
+# 返回X,Y,T取整值，功能如int0
+
+#r4.iloc[:, -14:] = r4.iloc[:, -14:].apply(lambda x: round(x, 4))
+
+
+r4.to_csv('parameters_{0}.csv'.format(time), index=False)
